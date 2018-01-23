@@ -74,14 +74,14 @@ static inline void vm_push(vm_env *env, size_t n);
 #define VM_JGT() VM_J_TYPE_INST(>)
 #define VM_JNZ() VM_J_TYPE_INST(!=)
 
-#define VM_CALL_HANDLER()                               \
-    do {                                                \
-        if (OPCODE_IMPL(OPCODE).handler)                \
-            OPCODE_IMPL(OPCODE).handler(                \
-                vm_get_op_value(env, &OPCODE.op1),      \
-                vm_get_op_value(env, &OPCODE.op2),      \
-                vm_get_temp_value(env, OPCODE.result)); \
-        DISPATCH;                                       \
+#define VM_CALL_HANDLER()                                        \
+    do {                                                         \
+        if (OPCODE_IMPL(OPCODE).handler)                         \
+            OPCODE_IMPL(OPCODE)                                  \
+                .handler(vm_get_op_value(env, &OPCODE.op1),      \
+                         vm_get_op_value(env, &OPCODE.op2),      \
+                         vm_get_temp_value(env, OPCODE.result)); \
+        DISPATCH;                                                \
     } while (0)
 
 /* Constant pool max size */
@@ -162,11 +162,11 @@ int vm_find_label(vm_env *env, const char *label)
 void vm_make_label(vm_env *env, const char *label, int insts_count)
 {
     unsigned hash = hash_djb2(label, LABEL_HASH_TABLE_SIZE);
-    vm_label *new = malloc(sizeof(vm_label));
-    new->str = strdup(label);
-    new->to = insts_count;
-    new->next = env->labels[hash];
-    env->labels[hash] = new;
+    vm_label *new_label = malloc(sizeof(vm_label));
+    new_label->str = strdup(label);
+    new_label->to = insts_count;
+    new_label->next = env->labels[hash];
+    env->labels[hash] = new_label;
 }
 
 size_t vm_add_const(vm_env *env, int type, void *value)
