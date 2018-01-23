@@ -1,9 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "hash.h"
+#include "opcode.h"
 #include "vm.h"
 #include "vm_codegen.h"
-#include "opcode.h"
 
 #if !defined(__GNUC__)
 #error "Only gcc is supported at present"
@@ -36,10 +37,17 @@
 
 static inline void vm_push(vm_env *env, size_t n);
 
-#define VM_CALL(n)               \
-    do {                         \
-        vm_push(env, env->r.pc); \
-        GOTO(n);                 \
+#define VM_CALL()                                                 \
+    do {                                                          \
+        vm_push(env, env->r.pc);                                  \
+        size_t n = vm_get_op_value(env, &OPCODE.op1)->value.vint; \
+        GOTO(n);                                                  \
+    } while (0)
+
+#define VM_JMP()                                                  \
+    do {                                                          \
+        size_t n = vm_get_op_value(env, &OPCODE.op1)->value.vint; \
+        GOTO(n);                                                  \
     } while (0)
 
 #define VM_RET()                     \
@@ -48,12 +56,14 @@ static inline void vm_push(vm_env *env, size_t n);
         GOTO(pc);                    \
     } while (0)
 
-#define VM_J_TYPE_INST(cond)                                     \
-    do {                                                         \
-        int gle = vm_get_op_value(env, &OPCODE.op1)->value.vint; \
-        if (gle cond 0)                                          \
-            GOTO(OPCODE.op2.value.id);                           \
-        DISPATCH;                                                \
+#define VM_J_TYPE_INST(cond)                                          \
+    do {                                                              \
+        int gle = vm_get_op_value(env, &OPCODE.op1)->value.vint;      \
+        if (gle cond 0) {                                             \
+            size_t n = vm_get_op_value(env, &OPCODE.op2)->value.vint; \
+            GOTO(n);                                                  \
+        }                                                             \
+        DISPATCH;                                                     \
     } while (0)
 
 #define VM_JLT() VM_J_TYPE_INST(<)
@@ -63,14 +73,15 @@ static inline void vm_push(vm_env *env, size_t n);
 #define VM_JGT() VM_J_TYPE_INST(>)
 #define VM_JNZ() VM_J_TYPE_INST(!=)
 
+
 /* clang-format off */
-#define VM_CALL_HANDLER()                                               \
-    do {                                                                \
-        if (OPCODE_IMPL(OPCODE))                                        \
-            OPCODE_IMPL(OPCODE) (vm_get_op_value(env, &OPCODE.op1),     \
-                                 vm_get_op_value(env, &OPCODE.op2),     \
-                                 vm_get_temp_value(env, OPCODE.result));\
-        DISPATCH;                                                       \
+#define VM_CALL_HANDLER()                                                \
+    do {                                                                 \
+        if (OPCODE_IMPL(OPCODE))                                         \
+            OPCODE_IMPL(OPCODE) (vm_get_op_value(env, &OPCODE.op1),      \
+                                 vm_get_op_value(env, &OPCODE.op2),      \
+                                 vm_get_temp_value(env, OPCODE.result)); \
+        DISPATCH;                                                        \
     } while (0)
 /* clang-format on */
 
@@ -86,6 +97,9 @@ static inline void vm_push(vm_env *env, size_t n);
 /* OPCODE impl max size */
 #define OPCODE_IMPL_MAX_SIZE 256
 
+/* Label hash table size */
+#define LABEL_HASH_TABLE_SIZE 49157
+
 typedef struct {
     size_t pc;    // program counter.
     size_t sp;    // stack runs from the end of 'temps' region.
@@ -94,10 +108,11 @@ typedef struct {
 } vm_regs;
 
 struct __vm_env {
-    vm_inst insts[INSTS_MAX_SIZE];         /* Program instructions */
-    vm_value cpool[CPOOL_MAX_SIZE];        /* Constant pool */
-    vm_value temps[TEMPS_MAX_SIZE];        /* Temporary storage */
-    vm_handler impl[OPCODE_IMPL_MAX_SIZE]; /* OPCODE impl */
+    vm_inst insts[INSTS_MAX_SIZE];           /* Program instructions */
+    vm_value cpool[CPOOL_MAX_SIZE];          /* Constant pool */
+    vm_value temps[TEMPS_MAX_SIZE];          /* Temporary storage(stack & heap) */
+    vm_handler impl[OPCODE_IMPL_MAX_SIZE];   /* OPCODE impl */
+    vm_label *labels[LABEL_HASH_TABLE_SIZE]; /* Label hash table */
     vm_regs r;
     int insts_count;
     int cpool_count;
@@ -120,7 +135,39 @@ vm_env *vm_new()
 
 void vm_free(vm_env *env)
 {
+    for (vm_label **i = env->labels; i < env->labels + LABEL_HASH_TABLE_SIZE;
+         ++i) {
+        vm_label *tmp = *i;
+        while (tmp != NULL) {
+            vm_label *p = tmp->next;
+            free(tmp);
+            tmp = p;
+        }
+    }
     free(env);
+}
+
+int vm_find_label(vm_env *env, const char *label)
+{
+    unsigned hash = hash_djb2(label, LABEL_HASH_TABLE_SIZE);
+    vm_label *now = env->labels[hash];
+    while (now != NULL) {
+        if (!strcmp(label, now->str)) {
+            return now->to;
+        }
+        now = now->next;
+    }
+    return -1;
+}
+
+void vm_make_label(vm_env *env, const char *label, int insts_count)
+{
+    unsigned hash = hash_djb2(label, LABEL_HASH_TABLE_SIZE);
+    vm_label *new_label = malloc(sizeof(vm_label));
+    new_label->str = strdup(label);
+    new_label->to = insts_count;
+    new_label->next = env->labels[hash];
+    env->labels[hash] = new_label;
 }
 
 size_t vm_add_const(vm_env *env, int type, void *value)
@@ -212,8 +259,8 @@ void vm_run(vm_env *env)
     OP(JGE) : VM_JGE();
     OP(JGT) : VM_JGT();
     OP(JNZ) : VM_JNZ();
-    OP(JMP) : GOTO(OPCODE.op1.value.id);
-    OP(CALL) : VM_CALL(OPCODE.op1.value.id);
+    OP(JMP) : VM_JMP();
+    OP(CALL) : VM_CALL();
     OP(RET) : VM_RET();
 
     OP(HALT) : goto terminate;
